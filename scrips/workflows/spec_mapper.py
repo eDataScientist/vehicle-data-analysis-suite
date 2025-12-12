@@ -308,7 +308,8 @@ class SpecMapper:
                            make_threshold: int = 80, model_threshold: int = 80,
                            trim_threshold: int = 80, use_original_on_no_match: bool = False,
                            method: str = "default", method_make: str = None, method_model: str = None,
-                           method_trim: str = None, skip_special_brands: bool = False) -> Dict[str, pd.DataFrame]:
+                           method_trim: str = None, skip_special_brands: bool = False,
+                           use_gemini_verification: bool = False) -> Dict[str, pd.DataFrame]:
         """Map specifications from input dataframe to reference dataframe format
 
         Args:
@@ -364,7 +365,7 @@ class SpecMapper:
 
         # Map makes
         mapped_makes, unmatched_makes = self._map_makes(
-            input_makes, reference_makes, make_threshold, method_make)
+            input_makes, reference_makes, make_threshold, method_make, use_gemini_verification)
 
         # Join with input data
         joined_input = processed_input_df.merge(
@@ -774,12 +775,14 @@ class SpecMapper:
         return corrected_models
 
     def _map_makes(self, input_makes: List[str], reference_makes: List[str],
-                   threshold: int = 80, method: str = "default") -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Map makes using fuzzy matching"""
+                   threshold: int = 80, method: str = "default",
+                   use_gemini_verification: bool = False) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Map makes using fuzzy matching with optional Gemini AI verification"""
         results = []
         unmatched = []
         scorer = self.get_scorer(method=method, simple=True)
 
+        # Phase 1: Fuzzy matching
         for make in tqdm(input_makes, desc="Mapping Makes"):
             input_value, matched_value, score = self.find_match_fuzzy(
                 make, reference_makes, threshold, simple=True, method=method)
@@ -794,6 +797,57 @@ class SpecMapper:
                 unmatched.append(
                     (make, best_match[0] if best_match else None,
                      best_match[1] if best_match else -1))
+
+        # Phase 2: Gemini AI verification (optional)
+        if use_gemini_verification:
+            try:
+                from ..services.gemini_verification_service import GeminiVerificationService
+
+                # Filter only matched makes (those with non-None mapped value)
+                matched_results = [(inp, mapped, score) for inp, mapped, score in results if mapped is not None]
+
+                if matched_results:
+                    print(f"\nVerifying {len(matched_results)} matched makes with Gemini AI...")
+
+                    # Initialize service
+                    verifier = GeminiVerificationService()
+
+                    # Run async verification
+                    import asyncio
+                    import nest_asyncio
+                    nest_asyncio.apply()
+
+                    verified_results = asyncio.run(
+                        verifier.verify_make_mappings_batch(matched_results)
+                    )
+
+                    # Separate verified and failed
+                    verified_makes = []
+                    failed_verification = []
+
+                    for input_make, mapped_make, score, is_verified in verified_results:
+                        if is_verified:
+                            verified_makes.append((input_make, mapped_make, score))
+                        else:
+                            # Failed verification -> move to unmatched
+                            best_match = process.extractOne(input_make, reference_makes, scorer=scorer)
+                            failed_verification.append(
+                                (input_make, best_match[0] if best_match else None,
+                                 best_match[1] if best_match else -1)
+                            )
+
+                    print(f"Gemini verification: {len(verified_makes)} verified, {len(failed_verification)} failed")
+
+                    # Update results - replace matched results with verified ones
+                    # Keep unmatched results (those with None mapped value) as-is
+                    unmatched_input = [inp for inp, mapped, _ in results if mapped is None]
+                    results = verified_makes + [(inp, None, -1) for inp in unmatched_input]
+                    unmatched.extend(failed_verification)
+
+            except ImportError:
+                print("Gemini verification service not available, skipping...")
+            except Exception as e:
+                print(f"Error during Gemini verification: {str(e)}, continuing with fuzzy results...")
 
         mapped_makes = pd.DataFrame(
             results, columns=['Input Make', 'Mapped Make', 'Score'])

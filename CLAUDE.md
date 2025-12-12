@@ -35,7 +35,8 @@ streamlit_app.py          # Main Streamlit UI and orchestration
 │   │   ├── combined_verifier_checker.py # Combines verification + discrepancy checking
 │   │   └── old_new_validator.py         # Data validation workflow
 │   └── services/         # Shared services
-│       └── translation_service.py       # OpenAI-based Arabic translation with async support
+│       ├── translation_service.py         # OpenAI-based Arabic translation with async support
+│       └── gemini_verification_service.py # Gemini AI verification for fuzzy matches
 ```
 
 ### Workflow Pattern
@@ -57,6 +58,7 @@ Each workflow class follows this structure:
 
 **SpecMapper**
 - Hierarchical fuzzy matching: Makes → Models → Trims
+- Optional Gemini AI verification for make mappings
 - Special processing for Mercedes-Benz (extracts class/trim from model)
 - Special processing for BMW (extracts series/trim from model)
 - Uses thefuzz library with configurable thresholds
@@ -82,10 +84,10 @@ Each workflow class follows this structure:
 
 ## Environment Variables
 
-Required for translation features:
+Required for optional features:
 ```
-OPENAI_API_KEY=<your_key>
-GEMINI_API_KEY=<your_key>  # Currently unused but configured
+OPENAI_API_KEY=<your_key>   # For Arabic translation service
+GEMINI_API_KEY=<your_key>   # For AI verification of fuzzy matches
 ```
 
 Store in `.env` file (git-ignored).
@@ -98,6 +100,7 @@ Key libraries:
 - `openpyxl`: Excel file handling and conditional formatting
 - `thefuzz` + `python-Levenshtein`: Fuzzy string matching
 - `openai`: Translation via GPT models (optional)
+- `google-genai`: Gemini AI verification (optional)
 - `nest-asyncio`: Async support in Jupyter/Streamlit environments
 - `tqdm`: Progress bars for long-running operations
 
@@ -128,6 +131,35 @@ When adding translation features:
 3. Provide progress callbacks for user feedback
 4. Use automotive-specific system prompts for context
 5. Handle ImportError gracefully (translation is optional)
+
+## Gemini AI Verification
+
+The Spec Mapper supports optional AI verification of make mappings using Google Gemini:
+
+**How It Works:**
+1. After fuzzy matching, matched makes (those passing the threshold) can be verified via Gemini 2.5 Flash Lite
+2. Gemini checks if input and mapped make refer to the same manufacturer using AI reasoning
+3. Failed verifications automatically move to the unmatched list
+4. Runs asynchronously with configurable concurrency (default: 100 parallel requests)
+
+**Configuration:**
+- Requires `GEMINI_API_KEY` in `.env` file
+- Toggle enabled/disabled via Streamlit UI checkbox
+- Only verifies already-matched records, not those that failed fuzzy matching
+- If API fails or returns False, record moves to unmatched
+
+**Implementation:**
+- Service: `scrips/services/gemini_verification_service.py`
+- Integration: `scrips/workflows/spec_mapper.py` in `_map_makes()` method
+- Uses same async pattern as translation service (nest_asyncio + semaphore)
+
+**Example Usage:**
+```python
+from scrips.services.gemini_verification_service import GeminiVerificationService
+
+verifier = GeminiVerificationService(max_concurrent_requests=100)
+verified_results = await verifier.verify_make_mappings_batch(mappings)
+```
 
 ## Common Patterns
 

@@ -1143,6 +1143,19 @@ def spec_mapper_tab():
                 help="When enabled, Mercedes and BMW vehicles will be processed using standard fuzzy matching instead of special extraction patterns"
             )
 
+            # Gemini AI Verification
+            use_gemini_verification = st.checkbox(
+                "Enable Gemini AI verification for makes",
+                key="sm_use_gemini",
+                help="Use Gemini AI to verify that fuzzy-matched makes actually refer to the same manufacturer. Failed verifications move to unmatched."
+            )
+
+            if use_gemini_verification:
+                if not os.getenv('GEMINI_API_KEY'):
+                    st.warning("⚠️ GEMINI_API_KEY not found in .env file. Verification will be skipped.")
+                else:
+                    st.info("✓ Gemini verification enabled. This will verify all matched makes.")
+
         with col2:
             # Advanced thresholds
             with st.expander("🔧 Advanced Settings"):
@@ -1230,7 +1243,8 @@ def spec_mapper_tab():
                         method_make=fuzzy_method_make,
                         method_model=fuzzy_method_model,
                         method_trim=fuzzy_method_trim,
-                        skip_special_brands=skip_special_brands
+                        skip_special_brands=skip_special_brands,
+                        use_gemini_verification=use_gemini_verification
                     )
 
                     # Display results summary
