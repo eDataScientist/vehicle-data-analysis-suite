@@ -25,6 +25,8 @@ class VehicleDataVerifier:
         self.reference_sheets = None
         self.logs_sheets = None
         self.merged_data = None
+        self._logs_row_id_col = "__vv_logs_row_id"
+        self._ref_row_id_col = "__vv_ref_row_id"
         # Initialize translation service if available
         self.translation_service = (
             ArabicTranslationService() if TRANSLATION_AVAILABLE else None
@@ -383,8 +385,10 @@ class VehicleDataVerifier:
         )
 
         # Now use the standardized column names for the working copies
-        ref_working = self.reference_data.copy()
-        logs_working = self.logs_data.copy()
+        ref_working = self.reference_data.copy().reset_index(drop=True)
+        logs_working = self.logs_data.copy().reset_index(drop=True)
+        ref_working[self._ref_row_id_col] = ref_working.index
+        logs_working[self._logs_row_id_col] = logs_working.index
 
         # Merge datasets using standardized column names
         self.merged_data = logs_working.merge(
@@ -452,7 +456,10 @@ class VehicleDataVerifier:
             mismatch_condition = mismatch_condition | ~match_series
 
         # Get mismatches
-        mismatches = self.merged_data[mismatch_condition]
+        internal_cols = [self._logs_row_id_col, self._ref_row_id_col]
+        mismatches = self.merged_data[mismatch_condition].drop(
+            columns=internal_cols, errors="ignore"
+        )
 
         # Build return dictionary
         result = {
@@ -521,7 +528,8 @@ class VehicleDataVerifier:
                 extra_matches[match_name] = ref_vals == logs_vals
 
         # Prepare data for saving
-        data_to_save = self.merged_data.copy()
+        internal_cols = [self._logs_row_id_col, self._ref_row_id_col]
+        data_to_save = self.merged_data.drop(columns=internal_cols, errors="ignore").copy()
 
         # Add match columns to main sheet if requested
         if include_mask_in_main:

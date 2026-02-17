@@ -171,6 +171,33 @@ class CombinedVerifierChecker:
                 return header_to_idx[alias]
         return None
 
+    def _align_column_by_row_ids(
+        self, merged_data: pd.DataFrame, source_df: pd.DataFrame, source_col: str, row_id_col: str
+    ) -> Optional[pd.Series]:
+        """Align a source column to merged rows using persisted row ids from verifier merge."""
+        if (
+            source_df is None
+            or source_col not in source_df.columns
+            or row_id_col not in merged_data.columns
+        ):
+            return None
+
+        source_values = source_df[source_col].reset_index(drop=True)
+        row_ids = pd.to_numeric(merged_data[row_id_col], errors="coerce")
+        aligned_values = []
+        source_len = len(source_values)
+        for row_id in row_ids:
+            if pd.isna(row_id):
+                aligned_values.append(None)
+                continue
+            row_idx = int(row_id)
+            if 0 <= row_idx < source_len:
+                aligned_values.append(source_values.iloc[row_idx])
+            else:
+                aligned_values.append(None)
+
+        return pd.Series(aligned_values, index=merged_data.index)
+
     def save_combined_results(self, include_mask_in_main: bool = True) -> io.BytesIO:
         """Save combined results by working directly with Excel workbook"""
         if self.analysis_results is None:
@@ -471,14 +498,25 @@ class CombinedVerifierChecker:
         for alias in self._resolve_header_aliases(col_name):
             if alias in merged_data.columns:
                 return merged_data[alias]
-        if (
-            self.full_reference_data is not None
-            and col_name in self.full_reference_data.columns
-        ):
+
+        # Use verifier row ids to keep discrepancy columns aligned to merged rows.
+        logs_row_id_col = getattr(self.verifier, "_logs_row_id_col", "__vv_logs_row_id")
+        aligned_logs = self._align_column_by_row_ids(
+            merged_data, self.full_logs_data, col_name, logs_row_id_col
+        )
+        if aligned_logs is not None:
+            return aligned_logs
+
+        ref_row_id_col = getattr(self.verifier, "_ref_row_id_col", "__vv_ref_row_id")
+        aligned_ref = self._align_column_by_row_ids(
+            merged_data, self.full_reference_data, col_name, ref_row_id_col
+        )
+        if aligned_ref is not None:
+            return aligned_ref
+
+        if self.full_reference_data is not None and col_name in self.full_reference_data.columns:
             return self.full_reference_data[col_name]
-        if (
-            self.full_logs_data is not None and col_name in self.full_logs_data.columns
-        ):
+        if self.full_logs_data is not None and col_name in self.full_logs_data.columns:
             return self.full_logs_data[col_name]
         return None
 
