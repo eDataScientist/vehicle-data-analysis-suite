@@ -25,6 +25,7 @@ class CombinedVerifierChecker:
         # Store FULL original data before verifier processes it
         self.full_reference_data = None
         self.full_logs_data = None
+        self.extra_match_cols: List[Tuple[str, str]] = []
 
     # Delegate file operations to verifier
     def load_reference_data(
@@ -96,6 +97,7 @@ class CombinedVerifierChecker:
         extra_match_cols: List[Tuple[str, str]] = None,
     ) -> Dict:
         """Perform combined analysis by working directly with Excel workbook"""
+        self.extra_match_cols = extra_match_cols if extra_match_cols else []
 
         # Perform vehicle verification and get statistics
         verification_results = self.verifier.perform_verification(
@@ -131,6 +133,43 @@ class CombinedVerifierChecker:
         }
 
         return self.analysis_results
+
+    def _resolve_header_aliases(self, col_name: str) -> List[str]:
+        """Resolve possible header aliases for merged output columns."""
+        aliases = [col_name, f"{col_name}_primary", f"{col_name}_join"]
+
+        # If this is an extra matched pair, prefer side-specific aliases.
+        for ref_col, logs_col in self.extra_match_cols:
+            if col_name == logs_col:
+                aliases = [logs_col, f"{logs_col}_primary", f"{logs_col}_join"] + [
+                    a for a in aliases if a not in {logs_col, f"{logs_col}_primary", f"{logs_col}_join"}
+                ]
+                break
+            if col_name == ref_col:
+                aliases = [ref_col, f"{ref_col}_join", f"{ref_col}_primary"] + [
+                    a for a in aliases if a not in {ref_col, f"{ref_col}_join", f"{ref_col}_primary"}
+                ]
+                break
+
+        # Preserve order and uniqueness
+        seen = set()
+        ordered_aliases = []
+        for alias in aliases:
+            if alias not in seen:
+                seen.add(alias)
+                ordered_aliases.append(alias)
+        return ordered_aliases
+
+    def _find_worksheet_column_idx(self, worksheet, col_name: str, header_row: int = 1):
+        """Find worksheet column index using suffix-aware header aliases."""
+        header_to_idx = {
+            worksheet.cell(row=header_row, column=col_idx).value: col_idx
+            for col_idx in range(1, worksheet.max_column + 1)
+        }
+        for alias in self._resolve_header_aliases(col_name):
+            if alias in header_to_idx:
+                return header_to_idx[alias]
+        return None
 
     def save_combined_results(self, include_mask_in_main: bool = True) -> io.BytesIO:
         """Save combined results by working directly with Excel workbook"""
@@ -212,14 +251,8 @@ class CombinedVerifierChecker:
         last_col_idx = worksheet.max_column
 
         # Find column indices for val_col1 and val_col2 in the Excel sheet
-        val_col1_idx = None
-        val_col2_idx = None
-        for col_idx in range(1, last_col_idx + 1):
-            cell_value = worksheet.cell(row=header_row, column=col_idx).value
-            if cell_value == val_col1:
-                val_col1_idx = col_idx
-            if cell_value == val_col2:
-                val_col2_idx = col_idx
+        val_col1_idx = self._find_worksheet_column_idx(worksheet, val_col1, header_row)
+        val_col2_idx = self._find_worksheet_column_idx(worksheet, val_col2, header_row)
 
         # Append missing columns from full original data
         if val_col1_idx is None:
@@ -358,18 +391,9 @@ class CombinedVerifierChecker:
         last_col_idx = worksheet.max_column
 
         # Find column indices
-        anchor_col_idx = None
-        low_col_idx = None
-        high_col_idx = None
-
-        for col_idx in range(1, last_col_idx + 1):
-            cell_value = worksheet.cell(row=header_row, column=col_idx).value
-            if cell_value == anchor_col:
-                anchor_col_idx = col_idx
-            if cell_value == low_col:
-                low_col_idx = col_idx
-            if cell_value == high_col:
-                high_col_idx = col_idx
+        anchor_col_idx = self._find_worksheet_column_idx(worksheet, anchor_col, header_row)
+        low_col_idx = self._find_worksheet_column_idx(worksheet, low_col, header_row)
+        high_col_idx = self._find_worksheet_column_idx(worksheet, high_col, header_row)
 
         # Append missing columns from full original data
         if anchor_col_idx is None:
@@ -444,14 +468,15 @@ class CombinedVerifierChecker:
 
     def _find_column_data(self, col_name: str, merged_data: pd.DataFrame):
         """Helper to find column data from various sources"""
-        if col_name in merged_data.columns:
-            return merged_data[col_name]
-        elif (
+        for alias in self._resolve_header_aliases(col_name):
+            if alias in merged_data.columns:
+                return merged_data[alias]
+        if (
             self.full_reference_data is not None
             and col_name in self.full_reference_data.columns
         ):
             return self.full_reference_data[col_name]
-        elif (
+        if (
             self.full_logs_data is not None and col_name in self.full_logs_data.columns
         ):
             return self.full_logs_data[col_name]

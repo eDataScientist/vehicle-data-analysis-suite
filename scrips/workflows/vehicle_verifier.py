@@ -99,6 +99,33 @@ class VehicleDataVerifier:
             f"Available columns: {merged_cols}"
         )
 
+    def _resolve_extra_pair_headers(
+        self, ref_col: str, logs_col: str, headers: Dict[str, int]
+    ) -> Tuple[Optional[str], Optional[str]]:
+        """Resolve extra-match headers as (logs_header, ref_header).
+
+        The target (reference) side should prefer `_join` and the source (logs)
+        side should prefer `_primary`.
+        """
+
+        def _pick(candidates: List[str]) -> Optional[str]:
+            for candidate in candidates:
+                if candidate in headers:
+                    return candidate
+            return None
+
+        # Default to documented tuple order: (ref_col, logs_col)
+        ref_header = _pick([f"{ref_col}_join", ref_col])
+        logs_header = _pick([f"{logs_col}_primary", logs_col])
+
+        # Fallback for callers that may provide a swapped tuple order
+        if ref_header is None:
+            ref_header = _pick([f"{logs_col}_join", logs_col])
+        if logs_header is None:
+            logs_header = _pick([f"{ref_col}_primary", ref_col])
+
+        return logs_header, ref_header
+
     def get_reference_columns(self) -> List[str]:
         """Get list of available columns from reference data"""
         if self.reference_data is not None:
@@ -558,10 +585,11 @@ class VehicleDataVerifier:
                     match_name = f"{logs_col}_match"
                     if match_name in headers:
                         match_col_letter = get_column_letter(headers[match_name])
-                        # Handle suffixed column names from merge (when both sides share the same name)
-                        logs_header = logs_col + "_primary" if logs_col + "_primary" in headers else logs_col
-                        ref_header = ref_col + "_join" if ref_col + "_join" in headers else ref_col
-                        if logs_header in headers and ref_header in headers:
+                        # Handle suffixed column names from merge and keep formatting on reference side
+                        logs_header, ref_header = self._resolve_extra_pair_headers(
+                            ref_col, logs_col, headers
+                        )
+                        if logs_header and ref_header:
                             logs_col_letter = get_column_letter(headers[logs_header])
                             ref_col_letter = get_column_letter(headers[ref_header])
                             for r in range(2, max_row + 1):
@@ -693,9 +721,10 @@ class VehicleDataVerifier:
             # Formatting goes on the reference (_join) side, matching Make_ext/Model_ext pattern
             for ref_col, logs_col in extra_match_cols:
                 match_name = f"{logs_col}_match"
-                logs_header = logs_col + "_primary" if logs_col + "_primary" in headers else logs_col
-                ref_header = ref_col + "_join" if ref_col + "_join" in headers else ref_col
-                if logs_header in headers and ref_header in headers:
+                logs_header, ref_header = self._resolve_extra_pair_headers(
+                    ref_col, logs_col, headers
+                )
+                if logs_header and ref_header:
                     format_mappings.append(
                         (
                             ref_header,
@@ -758,7 +787,7 @@ class VehicleDataVerifier:
             for ref_col, logs_col in extra_match_cols:
                 col_letter = get_column_letter(mask_col_idx)
                 mask_ws[f"{col_letter}1"] = f"{logs_col}Match"
-                extra_match_cols_list.append((logs_col, ref_col, col_letter))
+                extra_match_cols_list.append((ref_col, logs_col, col_letter))
                 mask_col_idx += 1
 
             # Build mask formulas - directly compare the data columns
@@ -777,11 +806,12 @@ class VehicleDataVerifier:
                 )
 
                 # Add extra field match formulas
-                for logs_col, ref_col, mask_col_letter in extra_match_cols_list:
+                for ref_col, logs_col, mask_col_letter in extra_match_cols_list:
                     # Handle suffixed column names from merge
-                    logs_header = logs_col + "_primary" if logs_col + "_primary" in headers else logs_col
-                    ref_header = ref_col + "_join" if ref_col + "_join" in headers else ref_col
-                    if logs_header in headers and ref_header in headers:
+                    logs_header, ref_header = self._resolve_extra_pair_headers(
+                        ref_col, logs_col, headers
+                    )
+                    if logs_header and ref_header:
                         logs_col_letter = get_column_letter(headers[logs_header])
                         ref_col_letter = get_column_letter(headers[ref_header])
                         mask_ws[f"{mask_col_letter}{r}"] = (
@@ -809,10 +839,11 @@ class VehicleDataVerifier:
 
             # Add extra field mappings (handle suffixed column names from merge)
             # Formatting goes on the reference (_join) side, matching Make_ext/Model_ext pattern
-            for logs_col, ref_col, _ in extra_match_cols_list:
-                logs_header = logs_col + "_primary" if logs_col + "_primary" in headers else logs_col
-                ref_header = ref_col + "_join" if ref_col + "_join" in headers else ref_col
-                if logs_header in headers and ref_header in headers:
+            for ref_col, logs_col, _ in extra_match_cols_list:
+                logs_header, ref_header = self._resolve_extra_pair_headers(
+                    ref_col, logs_col, headers
+                )
+                if logs_header and ref_header:
                     format_mappings.append(
                         (
                             ref_header,
