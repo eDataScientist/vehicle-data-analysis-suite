@@ -27,19 +27,33 @@ class CombinedVerifierChecker:
         self.full_logs_data = None
 
     # Delegate file operations to verifier
-    def load_reference_data(self, file_data: Union[io.BytesIO, str], file_type: str = 'xlsx') -> List[str]:
+    def load_reference_data(
+        self, file_data: Union[io.BytesIO, str], file_type: str = "xlsx"
+    ) -> List[str]:
         return self.verifier.load_reference_data(file_data, file_type)
 
-    def select_reference_sheet(self, sheet_name: str, file_data: Union[io.BytesIO, str], file_type: str = 'xlsx') -> pd.DataFrame:
+    def select_reference_sheet(
+        self,
+        sheet_name: str,
+        file_data: Union[io.BytesIO, str],
+        file_type: str = "xlsx",
+    ) -> pd.DataFrame:
         df = self.verifier.select_reference_sheet(sheet_name, file_data, file_type)
         # Store FULL original data with ALL columns
         self.full_reference_data = df.copy()
         return df
 
-    def load_logs_data(self, file_data: Union[io.BytesIO, str], file_type: str = 'xlsx') -> List[str]:
+    def load_logs_data(
+        self, file_data: Union[io.BytesIO, str], file_type: str = "xlsx"
+    ) -> List[str]:
         return self.verifier.load_logs_data(file_data, file_type)
 
-    def select_logs_sheet(self, sheet_name: str, file_data: Union[io.BytesIO, str], file_type: str = 'xlsx') -> pd.DataFrame:
+    def select_logs_sheet(
+        self,
+        sheet_name: str,
+        file_data: Union[io.BytesIO, str],
+        file_type: str = "xlsx",
+    ) -> pd.DataFrame:
         df = self.verifier.select_logs_sheet(sheet_name, file_data, file_type)
         # Store FULL original data with ALL columns
         self.full_logs_data = df.copy()
@@ -51,43 +65,69 @@ class CombinedVerifierChecker:
     def get_logs_columns(self) -> List[str]:
         return self.verifier.get_logs_columns()
 
-    async def perform_translation(self, api_key: str, progress_callback=None) -> Dict[str, str]:
+    async def perform_translation(
+        self, api_key: str, progress_callback=None
+    ) -> Dict[str, str]:
         return await self.verifier.perform_translation(api_key, progress_callback)
 
-    def perform_combined_analysis(self,
-                                # Vehicle verification parameters
-                                chassis_col: str, make_ext_col: str, model_ext_col: str, year_ext_col: str,
-                                vin_col: str, make_col: str, model_col: str, year_col: str, spec_status_col: str,
-                                # Discrepancy analysis parameters
-                                analysis_mode: str, val_col1: str = None, val_col2: str = None,
-                                threshold: float = 15.0, dividend_col: str = None,
-                                highlight_mode: str = "entire_row",
-                                anchor_col: str = None, low_col: str = None, high_col: str = None) -> Dict:
+    def perform_combined_analysis(
+        self,
+        # Vehicle verification parameters
+        chassis_col: str,
+        make_ext_col: str,
+        model_ext_col: str,
+        year_ext_col: str,
+        vin_col: str,
+        make_col: str,
+        model_col: str,
+        year_col: str,
+        spec_status_col: str,
+        # Discrepancy analysis parameters
+        analysis_mode: str,
+        val_col1: str = None,
+        val_col2: str = None,
+        threshold: float = 15.0,
+        dividend_col: str = None,
+        highlight_mode: str = "entire_row",
+        anchor_col: str = None,
+        low_col: str = None,
+        high_col: str = None,
+        # Extra matching fields
+        extra_match_cols: List[Tuple[str, str]] = None,
+    ) -> Dict:
         """Perform combined analysis by working directly with Excel workbook"""
 
         # Perform vehicle verification and get statistics
         verification_results = self.verifier.perform_verification(
-            chassis_col, make_ext_col, model_ext_col, year_ext_col,
-            vin_col, make_col, model_col, year_col, spec_status_col
+            chassis_col,
+            make_ext_col,
+            model_ext_col,
+            year_ext_col,
+            vin_col,
+            make_col,
+            model_col,
+            year_col,
+            spec_status_col,
+            extra_match_cols=extra_match_cols,
         )
 
         # Store discrepancy configuration for later use
         self.discrepancy_config = {
-            'analysis_mode': analysis_mode,
-            'val_col1': val_col1,
-            'val_col2': val_col2,
-            'threshold': threshold,
-            'dividend_col': dividend_col,
-            'highlight_mode': highlight_mode,
-            'anchor_col': anchor_col,
-            'low_col': low_col,
-            'high_col': high_col
+            "analysis_mode": analysis_mode,
+            "val_col1": val_col1,
+            "val_col2": val_col2,
+            "threshold": threshold,
+            "dividend_col": dividend_col,
+            "highlight_mode": highlight_mode,
+            "anchor_col": anchor_col,
+            "low_col": low_col,
+            "high_col": high_col,
         }
 
         # Store results
         self.analysis_results = {
-            'verification_results': verification_results,
-            'analysis_mode': analysis_mode
+            "verification_results": verification_results,
+            "analysis_mode": analysis_mode,
         }
 
         return self.analysis_results
@@ -95,11 +135,15 @@ class CombinedVerifierChecker:
     def save_combined_results(self, include_mask_in_main: bool = True) -> io.BytesIO:
         """Save combined results by working directly with Excel workbook"""
         if self.analysis_results is None:
-            raise ValueError("No analysis results available. Run combined analysis first.")
+            raise ValueError(
+                "No analysis results available. Run combined analysis first."
+            )
 
         try:
             # Get the Excel file from verifier (with formulas and formatting intact)
-            verifier_excel = self.verifier.save_results(include_mask_in_main=include_mask_in_main)
+            verifier_excel = self.verifier.save_results(
+                include_mask_in_main=include_mask_in_main
+            )
 
             # If no discrepancy config, just return the verifier results
             if self.discrepancy_config is None:
@@ -110,8 +154,8 @@ class CombinedVerifierChecker:
             workbook = load_workbook(verifier_excel)
 
             # Work with the main analysis sheet
-            if 'Verification Analysis' in workbook.sheetnames:
-                worksheet = workbook['Verification Analysis']
+            if "Verification Analysis" in workbook.sheetnames:
+                worksheet = workbook["Verification Analysis"]
             else:
                 worksheet = workbook.active
 
@@ -120,9 +164,12 @@ class CombinedVerifierChecker:
 
             # Apply discrepancy analysis based on mode
             config = self.discrepancy_config
-            analysis_mode = config['analysis_mode']
+            analysis_mode = config["analysis_mode"]
 
-            if analysis_mode in ["Compare two columns within % threshold", "Absolute % difference with color coding"]:
+            if analysis_mode in [
+                "Compare two columns within % threshold",
+                "Absolute % difference with color coding",
+            ]:
                 self._add_percentage_discrepancy_to_excel(
                     worksheet, merged_data, config, include_mask_in_main
                 )
@@ -141,17 +188,24 @@ class CombinedVerifierChecker:
         except Exception as e:
             print(f"Error in save_combined_results: {str(e)}")
             import traceback
+
             print(traceback.format_exc())
             # Fallback to verifier results
             return self.verifier.save_results(include_mask_in_main=include_mask_in_main)
 
-    def _add_percentage_discrepancy_to_excel(self, worksheet, merged_data: pd.DataFrame, config: Dict, include_mask_in_main: bool):
+    def _add_percentage_discrepancy_to_excel(
+        self,
+        worksheet,
+        merged_data: pd.DataFrame,
+        config: Dict,
+        include_mask_in_main: bool,
+    ):
         """Add percentage discrepancy columns and formatting to Excel worksheet"""
-        val_col1 = config['val_col1']
-        val_col2 = config['val_col2']
-        threshold = config['threshold']
-        dividend_col = config['dividend_col']
-        analysis_mode = config['analysis_mode']
+        val_col1 = config["val_col1"]
+        val_col2 = config["val_col2"]
+        threshold = config["threshold"]
+        dividend_col = config["dividend_col"]
+        analysis_mode = config["analysis_mode"]
 
         # Find the header row and last column
         header_row = 1
@@ -192,6 +246,7 @@ class CombinedVerifierChecker:
 
         # Convert column indices to Excel column letters
         from openpyxl.utils import get_column_letter
+
         val_col1_letter = get_column_letter(val_col1_idx)
         val_col2_letter = get_column_letter(val_col2_idx)
 
@@ -201,7 +256,11 @@ class CombinedVerifierChecker:
         percent_diff_col_letter = get_column_letter(percent_diff_col_idx)
 
         # Set header
-        worksheet.cell(row=header_row, column=percent_diff_col_idx, value="Percentage Difference (%)")
+        worksheet.cell(
+            row=header_row,
+            column=percent_diff_col_idx,
+            value="Percentage Difference (%)",
+        )
 
         # Add formulas for each row
         total_rows = len(merged_data) + 1  # +1 for header
@@ -220,67 +279,79 @@ class CombinedVerifierChecker:
         # Apply conditional formatting
         if analysis_mode == "Compare two columns within % threshold":
             # Red fill for values exceeding threshold (absolute value)
-            red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+            red_fill = PatternFill(
+                start_color="FFC7CE", end_color="FFC7CE", fill_type="solid"
+            )
             red_font = Font(color="9C0006")
 
             # Format range for percentage difference column
-            range_address = f"{percent_diff_col_letter}2:{percent_diff_col_letter}{total_rows}"
+            range_address = (
+                f"{percent_diff_col_letter}2:{percent_diff_col_letter}{total_rows}"
+            )
 
             # Add conditional formatting rule for values > threshold
             worksheet.conditional_formatting.add(
                 range_address,
                 CellIsRule(
-                    operator='greaterThan',
+                    operator="greaterThan",
                     formula=[str(threshold)],
                     fill=red_fill,
-                    font=red_font
-                )
+                    font=red_font,
+                ),
             )
 
             # Add conditional formatting rule for values < -threshold
             worksheet.conditional_formatting.add(
                 range_address,
                 CellIsRule(
-                    operator='lessThan',
+                    operator="lessThan",
                     formula=[str(-threshold)],
                     fill=red_fill,
-                    font=red_font
-                )
+                    font=red_font,
+                ),
             )
 
         elif analysis_mode == "Absolute % difference with color coding":
             # Faint red for values above threshold
-            red_fill = PatternFill(start_color="FFE6E6", end_color="FFE6E6", fill_type="solid")
+            red_fill = PatternFill(
+                start_color="FFE6E6", end_color="FFE6E6", fill_type="solid"
+            )
             # Faint blue for values below negative threshold
-            blue_fill = PatternFill(start_color="E6F2FF", end_color="E6F2FF", fill_type="solid")
+            blue_fill = PatternFill(
+                start_color="E6F2FF", end_color="E6F2FF", fill_type="solid"
+            )
 
-            range_address = f"{percent_diff_col_letter}2:{percent_diff_col_letter}{total_rows}"
+            range_address = (
+                f"{percent_diff_col_letter}2:{percent_diff_col_letter}{total_rows}"
+            )
 
             # Red for positive values > threshold
             worksheet.conditional_formatting.add(
                 range_address,
                 CellIsRule(
-                    operator='greaterThan',
-                    formula=[str(threshold)],
-                    fill=red_fill
-                )
+                    operator="greaterThan", formula=[str(threshold)], fill=red_fill
+                ),
             )
 
             # Blue for negative values < -threshold
             worksheet.conditional_formatting.add(
                 range_address,
                 CellIsRule(
-                    operator='lessThan',
-                    formula=[str(-threshold)],
-                    fill=blue_fill
-                )
+                    operator="lessThan", formula=[str(-threshold)], fill=blue_fill
+                ),
             )
 
-    def _add_range_check_to_excel(self, worksheet, merged_data: pd.DataFrame, config: Dict, include_mask_in_main: bool):
+    def _add_range_check_to_excel(
+        self,
+        worksheet,
+        merged_data: pd.DataFrame,
+        config: Dict,
+        include_mask_in_main: bool,
+    ):
         """Add range check columns and formatting to Excel worksheet"""
-        anchor_col = config['anchor_col']
-        low_col = config['low_col']
-        high_col = config['high_col']
+        anchor_col = config["anchor_col"]
+        low_col = config["low_col"]
+        high_col = config["high_col"]
 
         # Find the header row and last column
         header_row = 1
@@ -336,6 +407,7 @@ class CombinedVerifierChecker:
 
         # Convert to column letters
         from openpyxl.utils import get_column_letter
+
         anchor_letter = get_column_letter(anchor_col_idx)
         low_letter = get_column_letter(low_col_idx)
         high_letter = get_column_letter(high_col_idx)
@@ -345,16 +417,20 @@ class CombinedVerifierChecker:
         within_range_col_idx = last_col_idx
         within_range_letter = get_column_letter(within_range_col_idx)
 
-        worksheet.cell(row=header_row, column=within_range_col_idx, value="Within Range")
+        worksheet.cell(
+            row=header_row, column=within_range_col_idx, value="Within Range"
+        )
 
         # Add formulas
         total_rows = len(merged_data) + 1
         for row_idx in range(2, total_rows + 1):
-            formula = f'=AND({anchor_letter}{row_idx}>={low_letter}{row_idx},{anchor_letter}{row_idx}<={high_letter}{row_idx})'
+            formula = f"=AND({anchor_letter}{row_idx}>={low_letter}{row_idx},{anchor_letter}{row_idx}<={high_letter}{row_idx})"
             worksheet.cell(row=row_idx, column=within_range_col_idx, value=formula)
 
         # Apply conditional formatting - red fill for FALSE (out of range)
-        red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+        red_fill = PatternFill(
+            start_color="FFC7CE", end_color="FFC7CE", fill_type="solid"
+        )
         red_font = Font(color="9C0006")
 
         range_address = f"{within_range_letter}2:{within_range_letter}{total_rows}"
@@ -362,20 +438,22 @@ class CombinedVerifierChecker:
         worksheet.conditional_formatting.add(
             range_address,
             CellIsRule(
-                operator='equal',
-                formula=['FALSE'],
-                fill=red_fill,
-                font=red_font
-            )
+                operator="equal", formula=["FALSE"], fill=red_fill, font=red_font
+            ),
         )
 
     def _find_column_data(self, col_name: str, merged_data: pd.DataFrame):
         """Helper to find column data from various sources"""
         if col_name in merged_data.columns:
             return merged_data[col_name]
-        elif self.full_reference_data is not None and col_name in self.full_reference_data.columns:
+        elif (
+            self.full_reference_data is not None
+            and col_name in self.full_reference_data.columns
+        ):
             return self.full_reference_data[col_name]
-        elif self.full_logs_data is not None and col_name in self.full_logs_data.columns:
+        elif (
+            self.full_logs_data is not None and col_name in self.full_logs_data.columns
+        ):
             return self.full_logs_data[col_name]
         return None
 
