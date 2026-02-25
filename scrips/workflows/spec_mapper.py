@@ -97,6 +97,11 @@ class SpecMapper:
             'G.M.C.': 'GMC',
         }
 
+        # Handle specific exact replacements
+        s = s.strip()
+        if s in ('MERCEDES', 'BENZ'):
+            s = 'MERCEDES BENZ'
+
         for old, new in manufacturer_replacements.items():
             if old in s:
                 s = s.replace(old, new)
@@ -228,6 +233,12 @@ class SpecMapper:
 
         cleaned = re.sub(r'\s+', ' ', model_designation.strip().upper())
 
+        while True:
+            original = cleaned
+            cleaned = re.sub(r'^(?:MERCEDES|BENZ)\b[-\s]*', '', cleaned)
+            if cleaned == original:
+                break
+
         patterns = [
             r'\bAMG\s*GT\s*(\d+)',
             r'\b(GTS|GT)\s+AMG\s*(\d*)',
@@ -240,7 +251,7 @@ class SpecMapper:
         for pattern in patterns:
             match = re.search(pattern, cleaned)
             if match:
-                if 'AMG GT' in pattern:
+                if 'AMG' in pattern and 'GT' in pattern and len(match.groups()) == 1:
                     class_name = "AMG GT-Class"
                     trim = match.group(1)
                 elif len(match.groups()) == 2:
@@ -922,12 +933,13 @@ class SpecMapper:
 
         print(f"Built trim reference: {len(make_model_trims)} make-model combinations")
 
-        # Create input trims dictionary
+        # Create input trims set (instead of dictionary to avoid overwriting duplicate trim strings with different make/model)
         if skip_special_brands:
             print(f"\n=== DEBUG: Filtering trims for standard mapping (INCLUDING Mercedes/BMW) ===")
         else:
             print(f"\n=== DEBUG: Filtering trims for standard mapping (EXCLUDING Mercedes/BMW) ===")
-        input_trims = {}
+        input_trims_set = set() # Store combinations of (trim, make, model)
+        dropped_trims = [] # Trims completely dropped due to parent missing
         total_rows = 0
         filtered_null_trim = 0
         filtered_null_make = 0
@@ -937,16 +949,21 @@ class SpecMapper:
 
         for _, row in tqdm(joined_input.iterrows(), total=len(joined_input), desc="Preparing input trims"):
             total_rows += 1
+            input_trim_val = row[column_config.input_trim]
 
             # Track filtering reasons
-            if pd.isna(row[column_config.input_trim]):
+            if pd.isna(input_trim_val):
                 filtered_null_trim += 1
                 continue
+                
+            # If make or model failed to map, the trim is dropped. Capture it for unmatched lists.
             if pd.isna(row['Mapped Make']):
                 filtered_null_make += 1
+                dropped_trims.append((input_trim_val, None, None))
                 continue
             if pd.isna(row.get('Mapped Model', None)):
                 filtered_null_model += 1
+                dropped_trims.append((input_trim_val, row['Mapped Make'], None))
                 continue
 
             # Only filter Mercedes/BMW when special processing is ENABLED
@@ -958,9 +975,8 @@ class SpecMapper:
                     filtered_bmw += 1
                     continue
 
-            # Add to input trims for standard mapping
-            input_trims[row[column_config.input_trim]] = (
-                row['Mapped Make'], row.get('Mapped Model', ''))
+            # Add to input trims (as a tuple to guarantee uniqueness over combination of Trim + Make + Model)
+            input_trims_set.add((input_trim_val, row['Mapped Make'], row['Mapped Model']))
 
         print(f"\n=== DEBUG: Trim filtering summary ===")
         print(f"Total rows processed: {total_rows}")
@@ -969,12 +985,16 @@ class SpecMapper:
         print(f"Filtered out - null model: {filtered_null_model}")
         print(f"Filtered out - Mercedes: {filtered_mercedes}")
         print(f"Filtered out - BMW: {filtered_bmw}")
-        print(f"Remaining for standard trim mapping: {len(input_trims)} unique trims")
-        print(f"Sample standard trims (first 10): {list(input_trims.keys())[:10]}")
+        print(f"Remaining for standard trim mapping: {len(input_trims_set)} unique combinations")
 
-        # Map standard trims
+        # Create dropped trims dataframe
+        dropped_trims_df = pd.DataFrame(dropped_trims, columns=['Input Trim', 'Master Make', 'Master Model'])
+        dropped_trims_df['Best Match'] = None
+        dropped_trims_df['Score'] = -1
+
+        # Map standard trims using the unique combinations set
         mapped_trims_standard, unmatched_trims_standard = self._map_trims_standard(
-            input_trims, make_model_trims, threshold, method)
+            input_trims_set, make_model_trims, threshold, method)
 
         print(f"\n=== DEBUG: Standard trim mapping results ===")
         print(f"Standard mapped trims: {len(mapped_trims_standard)} rows, {mapped_trims_standard['Input Trim'].nunique() if not mapped_trims_standard.empty else 0} unique")
@@ -986,7 +1006,17 @@ class SpecMapper:
 
         mapped_trims = pd.concat([mapped_trims_standard, mercedes_trims_df, bmw_trims_df],
                                  ignore_index=True)
-        unmatched_trims = unmatched_trims_standard
+                                 
+        # Include dropped trims that had no matched parents
+        unmatched_trims = pd.concat([unmatched_trims_standard, dropped_trims_df], ignore_index=True)
+        # Deduplicate unmatched trims
+        if not unmatched_trims.empty:
+            unmatched_trims = unmatched_trims.drop_duplicates(subset=['Input Trim'])
+            
+            # Remove any unmatched trims that were actually successfully mapped in another row
+            if not mapped_trims.empty:
+                successful_trims = set(mapped_trims['Input Trim'].dropna())
+                unmatched_trims = unmatched_trims[~unmatched_trims['Input Trim'].isin(successful_trims)]
 
         print(f"After concat - Total mapped trims: {len(mapped_trims)} rows, {mapped_trims['Input Trim'].nunique() if not mapped_trims.empty else 0} unique")
         print(f"Final unmatched trims: {len(unmatched_trims)} rows, {unmatched_trims['Input Trim'].nunique() if not unmatched_trims.empty else 0} unique")
@@ -998,7 +1028,7 @@ class SpecMapper:
 
         return mapped_trims, unmatched_trims
 
-    def _map_trims_standard(self, input_trims: Dict[str, Tuple[str, str]],
+    def _map_trims_standard(self, input_trims_set: set,
                             make_model_trims: Dict[str, List[str]],
                             threshold: int = 80, method: str = "default") -> Tuple[pd.DataFrame, pd.DataFrame]:
         """Map standard trims using fuzzy matching"""
@@ -1006,7 +1036,7 @@ class SpecMapper:
         unmatched = []
         scorer = self.get_scorer(method=method, simple=False)
 
-        for trim, (master_make, master_model) in tqdm(input_trims.items(), desc="Mapping Trims"):
+        for trim, master_make, master_model in tqdm(input_trims_set, desc="Mapping Trims"):
             make_model_key = f"{master_make}_{master_model}"
             if make_model_key not in make_model_trims:
                 unmatched.append((trim, None, -1, master_make, master_model))
@@ -1573,9 +1603,9 @@ class SpecMapper:
             summary_data = {
                 'Dimension': ['Makes', 'Models', 'Trims'],
                 'Total': [
-                    mapped_makes_count + unmatched_makes_count,
-                    mapped_models_count + unmatched_models_count,
-                    mapped_trims_count + unmatched_trims_count
+                    original_input_df[column_config.input_make].dropna().nunique() if column_config.input_make in original_input_df.columns else 0,
+                    original_input_df[column_config.input_model].dropna().nunique() if column_config.input_model in original_input_df.columns else 0,
+                    original_input_df[column_config.input_trim].dropna().nunique() if column_config.input_trim in original_input_df.columns else 0
                 ],
                 'Mapped': [
                     mapped_makes_count,
