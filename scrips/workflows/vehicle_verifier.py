@@ -211,6 +211,7 @@ class VehicleDataVerifier:
         year_col: str,
         spec_status_col: str,
         extra_cols: List[str] = None,
+        keep_all_columns: bool = False,
     ) -> pd.DataFrame:
         """Prepare logs data with column mappings
 
@@ -221,6 +222,7 @@ class VehicleDataVerifier:
             year_col: Year column name
             spec_status_col: Specification status column name
             extra_cols: Additional columns to include in the output
+            keep_all_columns: If True, include all columns from the original logs data
         """
         if self.logs_data is None:
             raise ValueError("Logs data not loaded")
@@ -253,8 +255,12 @@ class VehicleDataVerifier:
             "Specification Status": self.logs_data[spec_status_col],
         }
 
-        # Add extra columns with original names
-        if extra_cols:
+        if keep_all_columns:
+            for col in self.logs_data.columns:
+                if col not in mapped_data:
+                    mapped_data[col] = self.logs_data[col]
+        elif extra_cols:
+            # Add extra columns with original names
             missing_extra = []
             for col in extra_cols:
                 if col in self.logs_data.columns:
@@ -276,19 +282,23 @@ class VehicleDataVerifier:
     ) -> Dict[str, str]:
         """Perform Arabic to English translation on brand and model names"""
         if not TRANSLATION_AVAILABLE or not self.translation_service:
-            return {"error": "Translation not available. Install openai library."}
+            return {"error": "Translation not available. Install google-genai library."}
 
         if self.reference_data is None:
             return {"error": "Reference data not loaded"}
 
         try:
+            # Reinitialize translation service with the provided API key
+            if api_key:
+                from scrips.services.translation_service import ArabicTranslationService
+                self.translation_service = ArabicTranslationService(api_key=api_key)
+
             # Use the translation service to translate the DataFrame columns
             self.reference_data = (
                 await self.translation_service.translate_dataframe_columns(
                     self.reference_data,
                     ["Make_ext", "Model_ext"],
-                    api_key,
-                    progress_callback,
+                    progress_callback=progress_callback,
                 )
             )
 
@@ -334,6 +344,7 @@ class VehicleDataVerifier:
         year_col: str,
         spec_status_col: str,
         extra_match_cols: List[Tuple[str, str]] = None,  # type: ignore[assignment]
+        keep_all_logs_columns: bool = False,
     ) -> Dict[str, Union[int, float, pd.DataFrame]]:
         """Perform verification analysis between reference and logs data
 
@@ -382,6 +393,7 @@ class VehicleDataVerifier:
             year_col,
             spec_status_col,
             extra_cols=extra_logs_cols,
+            keep_all_columns=keep_all_logs_columns,
         )
 
         # Now use the standardized column names for the working copies

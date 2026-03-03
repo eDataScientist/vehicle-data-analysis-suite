@@ -8,12 +8,13 @@ using OpenAI's API with automotive-specific prompts and batch processing support
 import re
 import asyncio
 import nest_asyncio
+import os
 from typing import Dict, List, Optional, Callable
 import pandas as pd
 
 # Translation imports (optional)
 try:
-    from openai import AsyncOpenAI
+    from google import genai
     TRANSLATION_AVAILABLE = True
 except ImportError:
     TRANSLATION_AVAILABLE = False
@@ -21,7 +22,7 @@ except ImportError:
 
 class ArabicTranslationService:
     """
-    Service for translating Arabic vehicle names to English using OpenAI API.
+    Service for translating Arabic vehicle names to English using Gemini API.
     
     Features:
     - Async batch translation with rate limiting
@@ -31,13 +32,25 @@ class ArabicTranslationService:
     - Translation caching support
     """
     
-    def __init__(self, max_concurrent_requests: int = 10):
+    def __init__(self, api_key: Optional[str] = None, max_concurrent_requests: int = 20):
         """
         Initialize the translation service.
         
         Args:
+            api_key: Optional Gemini API key. If not provided, reads from GEMINI_API_KEY env var
             max_concurrent_requests: Maximum number of concurrent API requests
         """
+        if not TRANSLATION_AVAILABLE:
+            print("google-genai package not installed. Translation features won't be available.")
+            self.client = None
+        else:
+            api_key = api_key or os.getenv('GEMINI_API_KEY')
+            if not api_key:
+                print("Warning: API key not provided and GEMINI_API_KEY not found in environment variables. Translation may fail.")
+                self.client = None
+            else:
+                self.client = genai.Client(api_key=api_key)
+
         self.max_concurrent_requests = max_concurrent_requests
         self._translation_cache = {}
         
@@ -73,15 +86,14 @@ class ArabicTranslationService:
         """
         return [i for i, s in enumerate(strings) if self.detect_arabic_text(s)]
     
-    async def translate_text(self, text: str, api_key: str, 
+    async def translate_text(self, text: str, 
                            source_lang: str = 'ar', target_lang: str = 'en',
                            use_cache: bool = True) -> Optional[str]:
         """
-        Translate a single text using OpenAI API.
+        Translate a single text using Gemini API.
         
         Args:
             text: Text to translate
-            api_key: OpenAI API key
             source_lang: Source language code (default: 'ar')
             target_lang: Target language code (default: 'en')
             use_cache: Whether to use translation cache
@@ -89,7 +101,7 @@ class ArabicTranslationService:
         Returns:
             Translated text or None if translation failed
         """
-        if not self.is_available:
+        if not self.is_available or not self.client:
             return None
         
         # Check cache first
@@ -111,16 +123,17 @@ class ArabicTranslationService:
         """
 
         try:
-            client = AsyncOpenAI(api_key=api_key)
-            response = await client.chat.completions.create(
-                model="gpt-4",
-                messages=[
-                    {"role": "system", "content": sys_prompt},
-                    {"role": "user", "content": f"Translate the following text from {source_lang} to {target_lang}: {text}"}
+            from google.genai import types
+
+            response = await self.client.aio.models.generate_content(
+                model="gemini-3-flash-preview",
+                contents=[
+                    sys_prompt,
+                    f"Translate the following text from {source_lang} to {target_lang}: {text}"
                 ],
-                temperature=0.0,
+                config=types.GenerateContentConfig(temperature=0.0)
             )
-            translation = response.choices[0].message.content.strip()
+            translation = response.text.strip()
             
             # Cache the translation
             if use_cache:
@@ -132,7 +145,7 @@ class ArabicTranslationService:
             print(f"Error translating text '{text}': {e}")
             return None
     
-    async def translate_batch(self, texts: List[str], api_key: str,
+    async def translate_batch(self, texts: List[str],
                             progress_callback: Optional[Callable[[int, int], None]] = None,
                             source_lang: str = 'ar', target_lang: str = 'en',
                             use_cache: bool = True) -> Dict[str, str]:
@@ -141,7 +154,6 @@ class ArabicTranslationService:
         
         Args:
             texts: List of texts to translate
-            api_key: OpenAI API key
             progress_callback: Optional callback for progress updates
             source_lang: Source language code (default: 'ar')
             target_lang: Target language code (default: 'en')
@@ -179,7 +191,7 @@ class ArabicTranslationService:
             """Translate text with semaphore control."""
             async with semaphore:
                 translation = await self.translate_text(
-                    text, api_key, source_lang, target_lang, use_cache
+                    text, source_lang, target_lang, use_cache
                 )
                 if progress_callback:
                     progress_callback(index + 1, len(unique_texts))
@@ -206,7 +218,7 @@ class ArabicTranslationService:
         return translation_map
     
     async def translate_dataframe_columns(self, df: pd.DataFrame, 
-                                        columns: List[str], api_key: str,
+                                        columns: List[str],
                                         progress_callback: Optional[Callable[[int, int], None]] = None,
                                         use_cache: bool = True) -> pd.DataFrame:
         """
@@ -215,7 +227,6 @@ class ArabicTranslationService:
         Args:
             df: DataFrame to process
             columns: List of column names to translate
-            api_key: OpenAI API key
             progress_callback: Optional callback for progress updates
             use_cache: Whether to use translation cache
             
@@ -240,7 +251,7 @@ class ArabicTranslationService:
             
             # Translate the Arabic values
             translations = await self.translate_batch(
-                arabic_values, api_key, progress_callback, use_cache=use_cache
+                arabic_values, progress_callback, use_cache=use_cache
             )
             
             # Apply translations to the column

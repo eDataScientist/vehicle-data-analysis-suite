@@ -111,6 +111,7 @@ class CombinedVerifierChecker:
             year_col,
             spec_status_col,
             extra_match_cols=extra_match_cols,
+            keep_all_logs_columns=True,
         )
 
         # Store discrepancy configuration for later use

@@ -8,6 +8,7 @@ Validates that input and mapped makes actually refer to the same manufacturer.
 import asyncio
 import nest_asyncio
 import os
+import json
 from typing import List, Tuple, Optional, Callable
 
 # Gemini imports (optional)
@@ -51,7 +52,7 @@ class GeminiVerificationService:
         """Check if Gemini functionality is available."""
         return GEMINI_AVAILABLE
 
-    async def verify_make_mapping(self, input_make: str, mapped_make: str) -> bool:
+    async def verify_make_mapping(self, input_make: str, mapped_make: str) -> Tuple[bool, str]:
         """
         Verify if input and mapped make refer to the same manufacturer.
 
@@ -60,32 +61,46 @@ class GeminiVerificationService:
             mapped_make: Mapped make from reference data
 
         Returns:
-            True if they refer to the same manufacturer, False otherwise
+            Tuple of (is_verified, reasoning)
         """
         sys_prompt = '''String-level mapping has been performed. Given the input and mapped Vehicle Make below, determine if they refer to the same manufacturer.
 
-Respond with only: True or False'''
+Respond in the following JSON format:
+{"verdict": true/false, "reason": "brief explanation of why they match or don't match"}
+
+Respond with ONLY the JSON object, no other text.'''
 
         try:
             response = await self.client.aio.models.generate_content(
-                model="gemini-2.5-flash-lite",
+                model="gemini-3-flash-preview",
                 contents=[
                     sys_prompt,
                     f'Input: {input_make}\nMapped: {mapped_make}'
                 ]
             )
-            result = response.text.strip().lower() == 'true'
-            return result
+            raw = response.text.strip()
+            # Strip markdown code fences if present
+            if raw.startswith('```'):
+                raw = raw.split('\n', 1)[-1].rsplit('```', 1)[0].strip()
+
+            parsed = json.loads(raw)
+            verdict = bool(parsed.get('verdict', False))
+            reason = parsed.get('reason', 'No reason provided')
+            return (verdict, reason)
+        except (json.JSONDecodeError, KeyError):
+            # Fallback: try simple True/False parsing
+            text = response.text.strip().lower()
+            verdict = text.startswith('true') or '"verdict": true' in text
+            return (verdict, f'Raw response (parse failed): {response.text.strip()}')
         except Exception as e:
-            # On failure, return False (treat as unmatched per user requirement)
             print(f"Gemini API error for {input_make} -> {mapped_make}: {str(e)}")
-            return False
+            return (False, f'API error: {str(e)}')
 
     async def verify_make_mappings_batch(
         self,
         mappings: List[Tuple[str, str, int]],
         progress_callback: Optional[Callable] = None
-    ) -> List[Tuple[str, str, int, bool]]:
+    ) -> List[Tuple[str, str, int, bool, str]]:
         """
         Verify multiple make mappings in parallel.
 
@@ -94,7 +109,7 @@ Respond with only: True or False'''
             progress_callback: Optional callback function called after each verification
 
         Returns:
-            List of (input_make, mapped_make, score, is_verified) tuples
+            List of (input_make, mapped_make, score, is_verified, reasoning) tuples
         """
         nest_asyncio.apply()
 
@@ -102,10 +117,10 @@ Respond with only: True or False'''
 
         async def verify_with_semaphore(input_make, mapped_make, score):
             async with semaphore:
-                verified = await self.verify_make_mapping(input_make, mapped_make)
+                verified, reason = await self.verify_make_mapping(input_make, mapped_make)
                 if progress_callback:
                     progress_callback()
-                return (input_make, mapped_make, score, verified)
+                return (input_make, mapped_make, score, verified, reason)
 
         tasks = [
             verify_with_semaphore(input_make, mapped_make, score)
