@@ -31,6 +31,8 @@ class SpecMapper:
         self.reference_data = None
         self.input_sheets = None
         self.reference_sheets = None
+        self._mercedes_catalog = None
+        self._bmw_catalog = None
 
     def load_input_data(self, file_data: Union[io.BytesIO, str], file_type: str = 'csv') -> List[str]:
         """Load input data file and return available sheets"""
@@ -125,17 +127,128 @@ class SpecMapper:
 
     @staticmethod
     def clean_extracted_model_name(model_name: str) -> str:
-        """Clean extracted model name by stripping brand names and whitespace"""
-        if not isinstance(model_name, str):
-            return model_name
+        """Clean extracted model name by stripping brand names and whitespace."""
+        normalized = SpecMapper._normalize_for_special_matching(model_name)
+        if not normalized:
+            return ""
 
-        # Strip potential brand names (BMW, Mercedes, Mercedes-Benz, Benz)
-        model_name = re.sub(r'\b(BMW|MERCEDES|MERCEDES-BENZ|BENZ)\b', '', model_name, flags=re.IGNORECASE)
+        # Remove brand prefixes in both spaced and compact forms.
+        normalized = re.sub(
+            r'^(MERCEDES\s*BENZ|MERCEDESBENZ|MERCEDES|BENZ|BMW)\s*',
+            '',
+            normalized
+        ).strip()
+        normalized = re.sub(
+            r'\b(MERCEDES\s*BENZ|MERCEDESBENZ|MERCEDES|BENZ|BMW)\b',
+            ' ',
+            normalized
+        )
+        normalized = ' '.join(normalized.split()).strip()
 
-        # Normalize whitespace
-        model_name = ' '.join(model_name.split())
+        compact = SpecMapper._compact_for_match(normalized)
+        for brand in ("MERCEDESBENZ", "MERCEDES", "BENZ", "BMW"):
+            if compact.startswith(brand):
+                compact = compact[len(brand):]
+                break
 
-        return model_name.strip()
+        if normalized:
+            return normalized
+        return compact
+
+    @staticmethod
+    def _safe_string(value: object) -> str:
+        """Convert arbitrary values to clean strings safely."""
+        if value is None:
+            return ""
+        try:
+            if pd.isna(value):
+                return ""
+        except Exception:
+            pass
+        return str(value).strip()
+
+    @staticmethod
+    def _normalize_for_special_matching(value: object) -> str:
+        """Normalize strings for special make model/trim matching."""
+        text = SpecMapper._safe_string(value)
+        if not text:
+            return ""
+        return SpecMapper.sanitize_string(text)
+
+    @staticmethod
+    def _compact_for_match(value: str) -> str:
+        """Create a compact alphanumeric representation for dirty/no-space input matching."""
+        return re.sub(r'[^A-Z0-9]+', '', value or "")
+
+    def _build_model_aliases(self, model: str, brand_key: str) -> List[str]:
+        """Generate aliases for robust model detection."""
+        model = self._normalize_for_special_matching(model)
+        aliases = {model}
+
+        if model.endswith(" CLASS"):
+            base = model[:-len(" CLASS")].strip()
+            if base:
+                aliases.add(base)
+            if brand_key == "MERCEDES" and base == "M":
+                aliases.add("ML")
+
+        if model.endswith(" SERIES"):
+            base = model[:-len(" SERIES")].strip()
+            if base:
+                aliases.add(base)
+
+        # AMG GT family is stored under model "AMG" in the reference.
+        if brand_key == "MERCEDES" and model == "AMG":
+            aliases.update({"AMG GT", "GT"})
+
+        return sorted(
+            [a for a in aliases if a],
+            key=lambda a: len(self._compact_for_match(a)),
+            reverse=True
+        )
+
+    def _build_special_brand_catalog(self, processed_reference_df: pd.DataFrame,
+                                     make_column: str, model_column: str, trim_column: str,
+                                     make_pattern: str, brand_key: str) -> Dict[str, object]:
+        """Build model/trim catalogs for special brand extraction from reference data."""
+        make_mask = processed_reference_df[make_column].astype(str).str.contains(
+            make_pattern, case=False, na=False
+        )
+        brand_df = processed_reference_df.loc[make_mask, [model_column, trim_column]].copy()
+
+        if brand_df.empty:
+            return {"models": [], "trims_by_model": {}, "model_aliases": {}}
+
+        brand_df[model_column] = brand_df[model_column].apply(self._normalize_for_special_matching)
+        brand_df[trim_column] = brand_df[trim_column].apply(self._normalize_for_special_matching)
+        brand_df = brand_df[brand_df[model_column] != ""]
+
+        models = sorted(
+            list(dict.fromkeys(brand_df[model_column].tolist())),
+            key=lambda m: len(self._compact_for_match(m)),
+            reverse=True
+        )
+
+        trims_by_model: Dict[str, List[str]] = {}
+        for model, group in brand_df.groupby(model_column):
+            trims = [
+                t for t in group[trim_column].tolist()
+                if t and t not in {"NAN", "NONE"}
+            ]
+            trims = list(dict.fromkeys(trims))
+            trims.sort(key=lambda t: len(self._compact_for_match(t)), reverse=True)
+            trims_by_model[model] = trims
+
+        model_aliases = {
+            model: self._build_model_aliases(model, brand_key)
+            for model in models
+        }
+
+        return {
+            "models": models,
+            "trims_by_model": trims_by_model,
+            "model_aliases": model_aliases
+        }
 
     @staticmethod
     def process_df(df: pd.DataFrame, columns: Dict[str, str]) -> pd.DataFrame:
@@ -219,101 +332,168 @@ class SpecMapper:
 
         return (input_value, None, -1)
 
-    @staticmethod
-    def extract_mercedes_class_and_trim(model_designation, include_trim=True):
-        """Extract Mercedes-Benz class name and optionally trim from model designation"""
-        class_mapping = {
-            'A': 'A-Class', 'C': 'C-Class', 'E': 'E-Class', 'S': 'S-Class',
-            'G': 'G-Class', 'GLC': 'GLC-Class', 'GLE': 'GLE-Class',
-            'GLS': 'GLS-Class', 'GLB': 'GLB-Class', 'GLA': 'GLA-Class',
-            'CLA': 'CLA-Class', 'CLS': 'CLS-Class', 'SL': 'SL-Class',
-            'SLC': 'SLC-Class', 'GT': 'GT-Class', 'GTS': 'GTS-Class',
-            'AMG GT': 'AMG GT-Class'
-        }
+    def _score_special_model(self, input_normalized: str, input_compact: str,
+                             model: str, aliases: List[str], brand_key: str) -> int:
+        """Score a model candidate against cleaned input."""
+        score = -1
 
-        cleaned = re.sub(r'\s+', ' ', model_designation.strip().upper())
+        for alias in aliases:
+            alias_compact = self._compact_for_match(alias)
+            if not alias_compact:
+                continue
 
-        while True:
-            original = cleaned
-            cleaned = re.sub(r'^(?:MERCEDES|BENZ)\b[-\s]*', '', cleaned)
-            if cleaned == original:
-                break
+            if input_compact == alias_compact or input_normalized == alias:
+                score = max(score, 1000 + len(alias_compact))
 
-        patterns = [
-            r'\bAMG\s*GT\s*(\d+)',
-            r'\b(GTS|GT)\s+AMG\s*(\d*)',
-            r'\b(GTS|GT)\s*(\d+)\s*AMG',
-            r'\b(GLC|GLE|GLS|GLB|GLA|CLA|CLS|SLC|SL)\s*(\d+)',
-            r'\b([ACEGS])\s*(\d+)',
-            r'\b(\d+)\s+([ACEGS]|GLC|GLE|GLS|GLB|GLA|CLA|CLS|SLC|SL)'
-        ]
+            if input_compact.startswith(alias_compact):
+                score = max(score, 950 + len(alias_compact))
 
-        for pattern in patterns:
-            match = re.search(pattern, cleaned)
-            if match:
-                if 'AMG' in pattern and 'GT' in pattern and len(match.groups()) == 1:
-                    class_name = "AMG GT-Class"
-                    trim = match.group(1)
-                elif len(match.groups()) == 2:
-                    class_prefix = match.group(1)
-                    trim = match.group(2)
+            if len(alias_compact) >= 3 and alias_compact in input_compact:
+                score = max(score, 850 + len(alias_compact))
 
-                    if trim.isalpha() and class_prefix.isdigit():
-                        class_prefix, trim = trim, class_prefix
+            if len(alias_compact) >= 2 and re.search(rf'\b{re.escape(alias)}\b', input_normalized):
+                score = max(score, 900 + len(alias_compact))
 
-                    if 'AMG' in cleaned and class_prefix in ['GTS', 'GT']:
-                        if not trim:
-                            trim = 'AMG'
-                        class_name = class_mapping.get(
-                            class_prefix, class_prefix + '-Class')
-                    elif class_prefix in class_mapping and trim:
-                        class_name = class_mapping[class_prefix]
-                    else:
-                        continue
-                else:
-                    continue
+        # BMW numeric series handling for inputs like 320I, M340I, M3.
+        if brand_key == "BMW" and model.endswith(" SERIES"):
+            series_digit = model.split()[0]
+            if re.search(rf'(^|[^A-Z0-9]){series_digit}SERIES', input_compact):
+                score = max(score, 920)
+            if re.search(rf'(^|[^A-Z0-9])M?{series_digit}\d{{2,3}}', input_compact):
+                score = max(score, 840)
+            if re.search(rf'(^|[^A-Z0-9])M{series_digit}(?!\d)', input_compact):
+                score = max(score, 835)
 
-                if include_trim:
-                    return f"{class_name} | {trim}"
-                else:
-                    return class_name
+        # Mercedes class handling for compact forms like C200 / GLC300 / ML350.
+        if brand_key == "MERCEDES" and model.endswith(" CLASS"):
+            base = model[:-len(" CLASS")].strip()
+            base_compact = self._compact_for_match(base)
 
-        return None
+            if base == "M" and re.search(r'(^|[^A-Z0-9])ML\d{2,3}', input_compact):
+                score = max(score, 910)
 
-    @staticmethod
-    def extract_bmw_series_and_trim(model_designation, include_trim=True):
-        """Extract BMW series name and trim from model designation"""
-        cleaned = re.sub(r'\s+', ' ', model_designation.strip().upper())
+            if len(base_compact) >= 2:
+                if f"{base_compact}CLASS" in input_compact:
+                    score = max(score, 915 + len(base_compact))
+                if re.search(rf'{re.escape(base_compact)}\d{{2,3}}', input_compact):
+                    score = max(score, 845 + len(base_compact))
+            elif len(base_compact) == 1:
+                if re.search(rf'(^|[^A-Z0-9]){re.escape(base_compact)}CLASS', input_compact):
+                    score = max(score, 910)
+                if re.search(rf'(^|[^A-Z0-9]){re.escape(base_compact)}\d{{2,3}}', input_compact):
+                    score = max(score, 830)
 
-        patterns = [
-            r'\b([1-8])(\d+[A-Z]*)',
-            r'\b(X[1-7])\s*(\d*[A-Z]*)',
-            r'\b(Z[0-9])\s*(\d*[A-Z]*)',
-            r'\b(I[0-9])\s*(\d*[A-Z]*)',
-            r'\b(M[0-9X]*)\s*(\d*[A-Z]*)',
-            r'\b([1-8X])\s+(\d+[A-Z]*)',
-        ]
+        return score
 
-        for pattern in patterns:
-            match = re.search(pattern, cleaned)
-            if match:
-                series_prefix = match.group(1)
-                trim = match.group(2) if match.group(2) else ""
+    def _score_special_trim(self, input_normalized: str, input_compact: str, trim: str) -> int:
+        """Score a trim candidate against cleaned input."""
+        trim_compact = self._compact_for_match(trim)
+        if not trim_compact:
+            return -1
 
-                if series_prefix.startswith(('X', 'Z', 'I', 'M')):
-                    series_name = f"{series_prefix} Series"
-                else:
-                    series_name = f"{series_prefix} Series"
+        score = -1
 
-                if not trim:
-                    trim = "Base"
+        if input_compact == trim_compact or input_normalized == trim:
+            score = max(score, 1000 + len(trim_compact))
 
-                if include_trim:
-                    return f"{series_name} | {trim}"
-                else:
-                    return series_name
+        if input_compact.endswith(trim_compact):
+            score = max(score, 960 + len(trim_compact))
 
-        return None
+        if input_compact.startswith(trim_compact):
+            score = max(score, 930 + len(trim_compact))
+
+        if " " in input_normalized and input_normalized.endswith(trim):
+            score = max(score, 970 + len(trim_compact))
+
+        if re.search(rf'\b{re.escape(trim)}\b', input_normalized):
+            score = max(score, 940 + len(trim_compact))
+
+        if len(trim_compact) >= 3 and trim_compact in input_compact:
+            score = max(score, 860 + len(trim_compact))
+
+        return score
+
+    def _extract_special_model_and_trim(self, model_designation: object, input_trim: object,
+                                        catalog: Dict[str, object], brand_key: str,
+                                        include_trim: bool = True) -> Optional[str]:
+        """Extract model (and optionally trim) for BMW/Mercedes using reference-driven catalogs."""
+        if not catalog or not catalog.get("models"):
+            return None
+
+        cleaned_model = self.clean_extracted_model_name(model_designation)
+        normalized_trim = self._normalize_for_special_matching(input_trim)
+
+        pieces = [cleaned_model]
+        if normalized_trim and normalized_trim not in {"NAN", "NONE", "STANDARD"}:
+            pieces.append(normalized_trim)
+
+        combined = " ".join([p for p in pieces if p]).strip()
+        input_normalized = self._normalize_for_special_matching(combined)
+        input_compact = self._compact_for_match(input_normalized)
+
+        if not input_compact:
+            return None
+
+        best_model = None
+        best_model_score = -1
+
+        for model in catalog["models"]:
+            aliases = catalog["model_aliases"].get(model, [model])
+            score = self._score_special_model(
+                input_normalized, input_compact, model, aliases, brand_key
+            )
+            if score > best_model_score:
+                best_model_score = score
+                best_model = model
+
+        if best_model is None or best_model_score < 0:
+            return None
+
+        if not include_trim:
+            return best_model
+
+        best_trim = None
+        best_trim_score = -1
+        for trim in catalog["trims_by_model"].get(best_model, []):
+            score = self._score_special_trim(input_normalized, input_compact, trim)
+            if score > best_trim_score:
+                best_trim_score = score
+                best_trim = trim
+
+        # Fuzzy fallback on trim value only when direct extraction fails.
+        if best_trim is None and normalized_trim and normalized_trim not in {"NAN", "NONE"}:
+            trim_candidates = catalog["trims_by_model"].get(best_model, [])
+            _, fuzzy_trim, _ = self.find_match_fuzzy(
+                normalized_trim, trim_candidates, threshold=70, simple=False, method="default"
+            )
+            best_trim = fuzzy_trim
+
+        if best_trim:
+            return f"{best_model} | {best_trim}"
+
+        return best_model
+
+    def extract_mercedes_class_and_trim(self, model_designation, include_trim=True,
+                                        input_trim=None, catalog=None):
+        """Extract Mercedes model/trim from free-form input."""
+        return self._extract_special_model_and_trim(
+            model_designation=model_designation,
+            input_trim=input_trim,
+            catalog=catalog or self._mercedes_catalog or {},
+            brand_key="MERCEDES",
+            include_trim=include_trim
+        )
+
+    def extract_bmw_series_and_trim(self, model_designation, include_trim=True,
+                                    input_trim=None, catalog=None):
+        """Extract BMW model/trim from free-form input."""
+        return self._extract_special_model_and_trim(
+            model_designation=model_designation,
+            input_trim=input_trim,
+            catalog=catalog or self._bmw_catalog or {},
+            brand_key="BMW",
+            include_trim=include_trim
+        )
 
     def map_specifications(self, column_config: ColumnConfig, skip_trim: bool = False,
                            make_threshold: int = 80, model_threshold: int = 80,
@@ -364,6 +544,29 @@ class SpecMapper:
         processed_reference_df = self.process_df(
             self.reference_data, ref_columns)
 
+        # Build special brand catalogs from the actual reference specification.
+        self._mercedes_catalog = self._build_special_brand_catalog(
+            processed_reference_df=processed_reference_df,
+            make_column=column_config.ref_make,
+            model_column=column_config.ref_model,
+            trim_column=column_config.ref_trim,
+            make_pattern='MERCEDES',
+            brand_key='MERCEDES'
+        )
+        self._bmw_catalog = self._build_special_brand_catalog(
+            processed_reference_df=processed_reference_df,
+            make_column=column_config.ref_make,
+            model_column=column_config.ref_model,
+            trim_column=column_config.ref_trim,
+            make_pattern='BMW',
+            brand_key='BMW'
+        )
+
+        print(
+            f"Special catalogs - Mercedes models: {len(self._mercedes_catalog.get('models', []))}, "
+            f"BMW models: {len(self._bmw_catalog.get('models', []))}"
+        )
+
         # Get unique makes
         reference_makes = processed_reference_df[column_config.ref_make].unique(
         ).tolist()
@@ -407,7 +610,7 @@ class SpecMapper:
 
             if not mercedes_vehicles.empty:
                 mercedes_models_df, mercedes_trims_df, unmapped_mercedes_df = self._process_mercedes_vehicles(
-                    mercedes_vehicles, column_config, skip_trim)
+                    mercedes_vehicles, column_config, skip_trim, self._mercedes_catalog)
                 joined_input.loc[mercedes_mask] = mercedes_vehicles.values
 
                 # Track failed extractions for fallback
@@ -423,7 +626,7 @@ class SpecMapper:
 
             if not bmw_vehicles.empty:
                 bmw_models_df, bmw_trims_df, unmapped_bmw_df = self._process_bmw_vehicles(
-                    bmw_vehicles, column_config, skip_trim)
+                    bmw_vehicles, column_config, skip_trim, self._bmw_catalog)
                 joined_input.loc[non_mercedes_vehicles.index[bmw_mask]
                                  ] = bmw_vehicles.values
 
@@ -458,48 +661,55 @@ class SpecMapper:
 
         make_models_worded = {}
         # This is a reverse mapping from worded model names to original model names
+        # Keyed by (worded_model, make) to avoid cross-make collisions
         reverse_mapping = {}
 
         for make, model_set in make_models.items():
             worded_models = self._wordify_models(model_set, make=make)
-            reverse_mapping.update({v: k for k, v in worded_models.items()})
+            for orig, worded in worded_models.items():
+                reverse_mapping[(worded, make)] = orig
             worded_models_list = list(worded_models.values())
             make_models_worded[make] = worded_models_list
 
         print("DEBUG: Prepared make_models_worded for standard models mapping")
 
         if not non_special_vehicles.empty:
-            input_models_makes = dict(
-                zip(non_special_vehicles[column_config.input_model],
-                    non_special_vehicles['Mapped Make']))
+            # Collect unique (model, make) pairs instead of a dictionary to avoid
+            # cross-make overwrites (e.g. S5 exists for AUDI, JAC, LUXGEN)
+            input_model_make_pairs = set()
+            for _, row in non_special_vehicles.iterrows():
+                model = row[column_config.input_model]
+                make = row['Mapped Make']
+                if isinstance(model, str) and isinstance(make, str):
+                    input_model_make_pairs.add((model, make))
 
             # Group input models by make for proper year pattern handling
             input_models_by_make = {}
-            for model, make in input_models_makes.items():
+            for model, make in input_model_make_pairs:
                 if make not in input_models_by_make:
                     input_models_by_make[make] = []
                 input_models_by_make[make].append(model)
 
             # Process each make's models separately with year pattern awareness
-            worded_input_models_makes = {}
+            # worded_input_models_set: set of (worded_model, make)
+            worded_input_models_set = set()
+            # reverse_input_mappings: (worded_model, make) -> original_model
             reverse_input_mappings = {}
             for make, models in input_models_by_make.items():
                 worded = self._wordify_models(models, make=make)
-                reverse_input_mappings.update({v: k for k, v in worded.items()})
-                # Map worded models back to their makes
                 for orig_model, worded_model in worded.items():
-                    worded_input_models_makes[worded_model] = make
+                    reverse_input_mappings[(worded_model, make)] = orig_model
+                    worded_input_models_set.add((worded_model, make))
 
-
-            print(reverse_input_mappings)
-
-            print(f"DEBUG: Prepared worded_input_models_makes for standard models mapping - {len(worded_input_models_makes)} entries")
+            print(f"DEBUG: Prepared worded_input_models_set for standard models mapping - {len(worded_input_models_set)} entries")
             
         else:
-            input_models_makes = {}
+            input_model_make_pairs = set()
+            worded_input_models_set = set()
+            reverse_input_mappings = {}
 
         mapped_models_standard, unmatched_models_standard = self._map_models(
-            worded_input_models_makes, make_models_worded, model_threshold, method_model)
+            worded_input_models_set, make_models_worded, model_threshold, method_model)
 
         # CRITICAL: Merge standard mapped models back into joined_input for trim mapping
         # Mercedes/BMW models were already updated in-place, but standard models need to be merged
@@ -509,27 +719,36 @@ class SpecMapper:
 
             # Ensure Mapped Model column exists
             if 'Mapped Model' not in joined_input.columns:
-                joined_input['Mapped Model'] = None
-                print("Created 'Mapped Model' column in joined_input")
+                 joined_input['Mapped Model'] = None
+                 print("Created 'Mapped Model' column in joined_input")
 
             # Create a lookup dict for faster merging
-            standard_model_lookup = dict(zip(
-                mapped_models_standard['Input Model'],
-                mapped_models_standard['Mapped Model'].map(reverse_mapping)
-            ))
+            # Keys are (original_input_model, make) tuples, values are original reference model names
+            standard_model_lookup = {}
+            for _, mrow in mapped_models_standard.iterrows():
+                worded_input = mrow['Input Model']
+                worded_ref = mrow['Mapped Model']
+                make = mrow['Master Make']
+                orig_input = reverse_input_mappings.get((worded_input, make), worded_input)
+                orig_ref = reverse_mapping.get((worded_ref, make), worded_ref)
+                standard_model_lookup[(orig_input, make)] = orig_ref
 
             # Update joined_input with mapped models for non-Mercedes/BMW vehicles
             for idx, row in joined_input.iterrows():
                 if pd.isna(row.get('Mapped Model', None)):  # Only update if not already set by Mercedes/BMW
                     input_model = row[column_config.input_model]
-                    if input_model in standard_model_lookup:
-                        joined_input.at[idx, 'Mapped Model'] = standard_model_lookup[input_model]
+                    mapped_make = row.get('Mapped Make', None)
+                    if (input_model, mapped_make) in standard_model_lookup:
+                        joined_input.at[idx, 'Mapped Model'] = standard_model_lookup[(input_model, mapped_make)]
 
             print(f"joined_input rows with Mapped Model after merge: {joined_input['Mapped Model'].notna().sum()}")
 
-        # Combine all model mappings
-        mapped_models_standard['Input Model'] = mapped_models_standard['Input Model'].map(reverse_input_mappings)
-        mapped_models_standard['Mapped Model'] = mapped_models_standard['Mapped Model'].map(reverse_mapping)
+        # Combine all model mappings - convert worded names back to originals using tuple-keyed dicts
+        if not mapped_models_standard.empty:
+            mapped_models_standard['Input Model'] = mapped_models_standard.apply(
+                lambda r: reverse_input_mappings.get((r['Input Model'], r['Master Make']), r['Input Model']), axis=1)
+            mapped_models_standard['Mapped Model'] = mapped_models_standard.apply(
+                lambda r: reverse_mapping.get((r['Mapped Model'], r['Master Make']), r['Mapped Model']), axis=1)
 
         # Identify which failed special brand models were successfully mapped via fallback
         fallback_success_models = set()
@@ -542,8 +761,11 @@ class SpecMapper:
                                   ignore_index=True)
 
         print('DEBUG UnMapped Models Standard Columns:', unmatched_models_standard.columns)
-        unmatched_models_standard['Input Model'] = unmatched_models_standard['Input Model'].map(reverse_input_mappings)
-        unmatched_models_standard['Best Match'] = unmatched_models_standard['Best Match'].map(reverse_mapping)
+        if not unmatched_models_standard.empty:
+            unmatched_models_standard['Input Model'] = unmatched_models_standard.apply(
+                lambda r: reverse_input_mappings.get((r['Input Model'], r['Master Make']), r['Input Model']), axis=1)
+            unmatched_models_standard['Best Match'] = unmatched_models_standard.apply(
+                lambda r: reverse_mapping.get((r['Best Match'], r['Master Make']), r['Best Match']) if r['Best Match'] is not None else None, axis=1)
 
         # Remove fallback successes from unmapped special brand lists
         if fallback_success_models:
@@ -577,6 +799,10 @@ class SpecMapper:
             'mapped_models': mapped_models,
             'unmatched_models': unmatched_models
         }
+
+        # Include Gemini verification log if available
+        if hasattr(self, 'gemini_verification_log') and self.gemini_verification_log:
+            results['gemini_verification_log'] = self.gemini_verification_log
 
         print(f"\n=== DEBUG: Base results created ===")
         print(f"Mapped makes: {len(mapped_makes)}")
@@ -835,19 +1061,32 @@ class SpecMapper:
                     # Separate verified and failed
                     verified_makes = []
                     failed_verification = []
+                    verification_log = []
 
-                    for input_make, mapped_make, score, is_verified in verified_results:
+                    for input_make, mapped_make, score, is_verified, reason in verified_results:
+                        verification_log.append({
+                            'input_make': input_make,
+                            'mapped_make': mapped_make,
+                            'score': score,
+                            'verified': is_verified,
+                            'reason': reason
+                        })
                         if is_verified:
                             verified_makes.append((input_make, mapped_make, score))
+                            print(f"  ✓ {input_make} -> {mapped_make} | {reason}")
                         else:
                             # Failed verification -> move to unmatched
+                            print(f"  ✗ {input_make} -> {mapped_make} | {reason}")
                             best_match = process.extractOne(input_make, reference_makes, scorer=scorer)
                             failed_verification.append(
                                 (input_make, best_match[0] if best_match else None,
                                  best_match[1] if best_match else -1)
                             )
 
-                    print(f"Gemini verification: {len(verified_makes)} verified, {len(failed_verification)} failed")
+                    # Store verification log on instance for output
+                    self.gemini_verification_log = verification_log
+
+                    print(f"\nGemini verification: {len(verified_makes)} verified, {len(failed_verification)} failed")
 
                     # Update results - replace matched results with verified ones
                     # Keep unmatched results (those with None mapped value) as-is
@@ -867,14 +1106,14 @@ class SpecMapper:
 
         return mapped_makes[mapped_makes['Mapped Make'].notnull()], unmatched_makes
 
-    def _map_models(self, input_models: Dict[str, str], make_models: Dict[str, List[str]],
+    def _map_models(self, input_models_set: set, make_models: Dict[str, List[str]],
                     threshold: int = 80, method: str = "default") -> Tuple[pd.DataFrame, pd.DataFrame]:
         """Map models using fuzzy matching"""
         results = []
         unmatched = []
         scorer = self.get_scorer(method=method, simple=False)
 
-        for model, master_make in tqdm(input_models.items(), desc="Mapping Models"):
+        for model, master_make in tqdm(input_models_set, desc="Mapping Models"):
             if master_make not in make_models:
                 unmatched.append((model, None, -1, master_make))
                 continue
@@ -1067,7 +1306,8 @@ class SpecMapper:
         return mapped_trims[mapped_trims['Mapped Trim'].notnull()], unmatched_trims
 
     def _process_mercedes_vehicles(self, mercedes_vehicles: pd.DataFrame,
-                                   column_config: ColumnConfig, skip_trim: bool = False) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+                                   column_config: ColumnConfig, skip_trim: bool = False,
+                                   mercedes_catalog: Optional[Dict[str, object]] = None) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         """Process Mercedes vehicles with special extraction logic"""
         mercedes_model_mappings = []
         mercedes_trim_mappings = []
@@ -1081,7 +1321,11 @@ class SpecMapper:
             cleaned_model = self.clean_extracted_model_name(original_model)
 
             extracted = self.extract_mercedes_class_and_trim(
-                cleaned_model, include_trim=not skip_trim)
+                cleaned_model,
+                include_trim=not skip_trim,
+                input_trim=original_trim,
+                catalog=mercedes_catalog
+            )
 
             if extracted:
                 if skip_trim:
@@ -1131,7 +1375,7 @@ class SpecMapper:
                     'Best Match': None,
                     'Score': -1,
                     'Master Make': row.get('Mapped Make', 'MERCEDES-BENZ'),
-                    'Reason': 'Extraction pattern failed'
+                    'Reason': 'Reference-based extraction failed'
                 })
 
         mercedes_models_df = pd.DataFrame(mercedes_model_mappings)
@@ -1141,7 +1385,8 @@ class SpecMapper:
         return mercedes_models_df, mercedes_trims_df, unmapped_mercedes_df
 
     def _process_bmw_vehicles(self, bmw_vehicles: pd.DataFrame,
-                              column_config: ColumnConfig, skip_trim: bool = False) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+                              column_config: ColumnConfig, skip_trim: bool = False,
+                              bmw_catalog: Optional[Dict[str, object]] = None) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         """Process BMW vehicles with special extraction logic"""
         bmw_model_mappings = []
         bmw_trim_mappings = []
@@ -1155,7 +1400,11 @@ class SpecMapper:
             cleaned_model = self.clean_extracted_model_name(original_model)
 
             extracted = self.extract_bmw_series_and_trim(
-                cleaned_model, include_trim=not skip_trim)
+                cleaned_model,
+                include_trim=not skip_trim,
+                input_trim=original_trim,
+                catalog=bmw_catalog
+            )
 
             if extracted:
                 if skip_trim:
@@ -1202,7 +1451,7 @@ class SpecMapper:
                     'Best Match': None,
                     'Score': -1,
                     'Master Make': row.get('Mapped Make', 'BMW'),
-                    'Reason': 'Extraction pattern failed'
+                    'Reason': 'Reference-based extraction failed'
                 })
 
         bmw_models_df = pd.DataFrame(bmw_model_mappings)
@@ -1261,6 +1510,17 @@ class SpecMapper:
             except Exception as e:
                 print(f"✗ Error creating {key}.csv: {str(e)}")
                 raise
+
+        # Create Gemini verification log JSON if available
+        if 'gemini_verification_log' in results and results['gemini_verification_log']:
+            import json
+            print("\n=== DEBUG: Creating Gemini verification log ===")
+            log_data = results['gemini_verification_log']
+            output = io.BytesIO()
+            output.write(json.dumps(log_data, indent=2, ensure_ascii=False).encode('utf-8'))
+            output.seek(0)
+            files['gemini_verification_log.json'] = output
+            print(f"✓ gemini_verification_log.json created ({len(log_data)} entries)")
 
         # Create consolidated file
         print("\n=== DEBUG: Creating consolidated file ===")
